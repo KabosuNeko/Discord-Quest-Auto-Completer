@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & Secret files
+.env
+tokens.txt
+
+# Logs & Database
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Editor & OS files
+.vscode/
+.idea/
+.DS_Store
