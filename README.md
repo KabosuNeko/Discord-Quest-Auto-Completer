@@ -15,7 +15,7 @@ pip install requests
 3. Paste the following snippet and press Enter:
 
 ```js
-(webpackChunkdiscord_app.push([[''],{},e=>{m=[];for(let c in e.c)m.push(e.c[c]);}]),m).find(m=>m?.exports?.default?.getToken!==void 0).exports.default.getToken()
+token=webpackChunkdiscord_app.push([[Symbol()],0,e=>{for(i in e.c)if(i=e.c[i].exports.getToken)return i()}])
 ```
 
 4. Copy the returned string token (starts with `MTU...` or similar).
