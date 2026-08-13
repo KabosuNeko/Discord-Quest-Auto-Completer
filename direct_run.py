@@ -835,25 +835,6 @@ def run_multiple(tokens: list[str], poll_interval: int = 60, run_once: bool = Fa
 
 def interactive_prompt() -> list[str]:
     """Interactive mode: prompt user to paste tokens."""
-    print(f"""
-  {C.CYAN}╭──────────────────────────────────────────────╮{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.BOLD}Enter Discord User Token(s){C.RESET}                  {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}                                              {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}How to get your token:{C.RESET}                      {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}  1. Open Discord (Web/App){C.RESET}                   {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}  2. Press F12 → Console{C.RESET}                       {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}  3. Paste:{C.RESET}                                 {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}     (webpackChunkdiscord_app.push([[{C.RESET}        {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}     ''],{{}},e=>{{m=[];for(let c in{C.RESET}          {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}     e.c)m.push(e.c[c])}}]),m).find{C.RESET}          {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}     (m=>m?.exports?.default?.getTo{C.RESET}          {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}     ken!==void 0).exports.default{C.RESET}           {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}     .getToken(){C.RESET}                             {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}                                              {C.CYAN}│{C.RESET}
-  {C.CYAN}│{C.RESET}  {C.DIM}Press Enter twice when done or type 'done'{C.RESET}   {C.CYAN}│{C.RESET}
-  {C.CYAN}╰──────────────────────────────────────────────╯{C.RESET}
-""")
-
     tokens = []
     while True:
         try:
