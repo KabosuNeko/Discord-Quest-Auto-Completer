@@ -6,6 +6,7 @@ __pycache__/
 # Environment & Secret files
 .env
 tokens.txt
+token.txt
 
 # Logs & Database
 *.log

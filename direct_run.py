@@ -4,8 +4,7 @@ Discord Quest Auto-Completer - KabosuNeko
 
 Usage:
   python direct_run.py                         # Interactive — enter tokens in terminal
-  python direct_run.py --token <TOKEN>         # Run single token
-  python direct_run.py --file tokens.txt       # Run multiple tokens from file (one token per line)
+  python direct_run.py --file tokens.txt       # Run tokens from file (one token per line)
   python direct_run.py --poll 90               # Set polling interval (seconds)
   python direct_run.py --once                  # Run once and exit (no loop)
 """
@@ -20,7 +19,7 @@ import json
 import signal
 import argparse
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 try:
@@ -35,7 +34,16 @@ except ImportError:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 API_BASE = "https://discord.com/api/v9"
+REQUEST_TIMEOUT = 30
 HEARTBEAT_INTERVAL = 20
+MAX_FAILURES = 10
+MAX_STALLS = 15
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "discord/1.0.9175 Chrome/128.0.6613.186 "
+    "Electron/32.2.7 Safari/537.36"
+)
 SUPPORTED_TASKS = [
     "WATCH_VIDEO",
     "PLAY_ON_DESKTOP",
@@ -92,12 +100,29 @@ def _get(d, *keys):
     return None
 
 
+def parse_timestamp(value) -> Optional[float]:
+    """Parse an ISO timestamp into epoch seconds; None when missing or invalid."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def response_completed(body: dict, task_type: str, seconds_needed: float) -> bool:
+    """True when a quest API response confirms the task is done."""
+    if body.get("completed_at"):
+        return True
+    progress = body.get("progress") or {}
+    return (progress.get(task_type) or {}).get("value", 0) >= seconds_needed
+
+
 def fetch_latest_build_number() -> int:
     """Scrape discord.com to get latest client build number."""
     FALLBACK = 504649
     try:
-        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36"
-        r = requests.get("https://discord.com/app", headers={"User-Agent": ua}, timeout=15)
+        r = requests.get("https://discord.com/app", headers={"User-Agent": USER_AGENT}, timeout=15)
         if r.status_code != 200:
             return FALLBACK
         scripts = re.findall(r'/assets/([a-f0-9]+)\.js', r.text)
@@ -110,7 +135,7 @@ def fetch_latest_build_number() -> int:
             try:
                 ar = requests.get(
                     f"https://discord.com/assets/{asset_hash}.js",
-                    headers={"User-Agent": ua}, timeout=15,
+                    headers={"User-Agent": USER_AGENT}, timeout=15,
                 )
                 m = re.search(r'buildNumber["\s:]+["\s]*(\d{5,7})', ar.text)
                 if m:
@@ -132,12 +157,7 @@ def make_super_properties(build_number: int) -> str:
         "os_arch": "x64",
         "app_arch": "x64",
         "system_locale": "en-US",
-        "browser_user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "discord/1.0.9175 Chrome/128.0.6613.186 "
-            "Electron/32.2.7 Safari/537.36"
-        ),
+        "browser_user_agent": USER_AGENT,
         "browser_version": "32.2.7",
         "client_build_number": build_number,
         "native_build_number": 59498,
@@ -152,19 +172,13 @@ class DiscordAPI:
     def __init__(self, token: str, build_number: int):
         self.token = token
         self.session = requests.Session()
-        ua = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "discord/1.0.9175 Chrome/128.0.6613.186 "
-            "Electron/32.2.7 Safari/537.36"
-        )
         sp = make_super_properties(build_number)
         self.session.headers.update({
             "Authorization": token,
             "Content-Type": "application/json",
             "Accept": "*/*",
             "Accept-Language": "en-US,en;q=0.9",
-            "User-Agent": ua,
+            "User-Agent": USER_AGENT,
             "X-Super-Properties": sp,
             "X-Discord-Locale": "en-US",
             "X-Discord-Timezone": "Asia/Ho_Chi_Minh",
@@ -173,10 +187,10 @@ class DiscordAPI:
         })
 
     def get(self, path: str):
-        return self.session.get(f"{API_BASE}{path}")
+        return self.session.get(f"{API_BASE}{path}", timeout=REQUEST_TIMEOUT)
 
     def post(self, path: str, payload=None):
-        return self.session.post(f"{API_BASE}{path}", json=payload)
+        return self.session.post(f"{API_BASE}{path}", json=payload, timeout=REQUEST_TIMEOUT)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -214,14 +228,9 @@ def get_user_status(quest):
 
 
 def is_completable(quest):
-    expires = get_expires_at(quest)
-    if expires:
-        try:
-            exp_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-            if exp_dt <= datetime.now(timezone.utc):
-                return False
-        except Exception:
-            pass
+    expires = parse_timestamp(get_expires_at(quest))
+    if expires and expires <= time.time():
+        return False
     tc = get_task_config(quest)
     if not tc or "tasks" not in tc:
         return False
@@ -261,9 +270,8 @@ def get_seconds_done(quest):
     task_type = get_task_type(quest)
     if not task_type:
         return 0
-    us = get_user_status(quest)
-    progress = us.get("progress", {})
-    return progress.get(task_type, {}).get("value", 0)
+    progress = get_user_status(quest).get("progress") or {}
+    return (progress.get(task_type) or {}).get("value", 0)
 
 
 def get_enrolled_at(quest):
@@ -341,53 +349,54 @@ class QuestCompleter:
 
         self._log("Authenticating account...")
         self.username = fetch_username(self._api)
-        self.user_id = decode_user_id(self.token)
         self._log(f"Logged in: {C.BOLD}{self.username}{C.RESET} (ID: {self.user_id})", "ok")
 
     # ── Fetch ─────────────────────────────────────────────────────────────
 
     def _fetch_quests(self) -> list:
-        try:
-            r = self._api.get("/quests/@me")
+        for _ in range(5):
+            try:
+                r = self._api.get("/quests/@me")
 
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict):
-                    blocked = _get(data, "quest_enrollment_blocked_until")
-                    if blocked:
-                        self._log(f"Enrollment blocked until: {blocked}", "warn")
-                    return data.get("quests", [])
-                elif isinstance(data, list):
-                    return data
-                return []
+                if r.status_code == 429:
+                    retry_after = r.json().get("retry_after", 10)
+                    self._log(f"Rate limited — waiting {retry_after}s", "warn")
+                    time.sleep(retry_after)
+                    continue
 
-            elif r.status_code == 429:
-                retry_after = r.json().get("retry_after", 10)
-                self._log(f"Rate limited — waiting {retry_after}s", "warn")
-                time.sleep(retry_after)
-                return self._fetch_quests()
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        blocked = _get(data, "quest_enrollment_blocked_until")
+                        if blocked:
+                            self._log(f"Enrollment blocked until: {blocked}", "warn")
+                        return data.get("quests") or []
+                    if isinstance(data, list):
+                        return data
+                    return []
 
-            elif r.status_code == 401:
-                self._log(f"{C.RED}Invalid or expired token!{C.RESET}", "error")
-                self._should_stop = True
-                return []
+                if r.status_code == 401:
+                    self._log(f"{C.RED}Invalid or expired token!{C.RESET}", "error")
+                    self._should_stop = True
+                    return []
 
-            elif r.status_code == 403:
-                self._log(f"{C.RED}Account locked or forbidden!{C.RESET}", "error")
-                self._should_stop = True
-                return []
+                if r.status_code == 403:
+                    self._log(f"{C.RED}Account locked or forbidden!{C.RESET}", "error")
+                    self._should_stop = True
+                    return []
 
-            else:
                 self._log(f"Error fetching quests ({r.status_code}): {r.text[:200]}", "warn")
                 return []
 
-        except requests.ConnectionError:
-            self._log("Network connection lost, retrying in 10s...", "error")
-            time.sleep(10)
-            return []
-        except Exception as e:
-            self._log(f"Error fetching quests: {e}", "error")
-            return []
+            except requests.ConnectionError:
+                self._log("Network connection lost, retrying in 10s...", "error")
+                time.sleep(10)
+            except Exception as e:
+                self._log(f"Error fetching quests: {e}", "error")
+                return []
+
+        self._log("Quest fetch failed after 5 retries, skipping this scan", "warn")
+        return []
 
     # ── Enroll ────────────────────────────────────────────────────────────
 
@@ -422,23 +431,20 @@ class QuestCompleter:
 
     # ── Complete: Video ───────────────────────────────────────────────────
 
-    def _complete_video(self, quest: dict):
+    def _complete_video(self, quest: dict) -> bool:
         name = get_quest_name(quest)
         qid = quest["id"]
+        task_type = get_task_type(quest)
         seconds_needed = get_seconds_needed(quest)
         seconds_done = get_seconds_done(quest)
-        enrolled_at_str = get_enrolled_at(quest)
-
-        if enrolled_at_str:
-            enrolled_ts = datetime.fromisoformat(enrolled_at_str.replace("Z", "+00:00")).timestamp()
-        else:
-            enrolled_ts = time.time()
+        enrolled_ts = parse_timestamp(get_enrolled_at(quest)) or time.time()
 
         self._log(f"󰕧 Video: {C.BOLD}{name}{C.RESET} ({seconds_done:.0f}/{seconds_needed}s)", "quest")
 
         max_future = 10
         speed = 7
         interval = 1
+        failures = 0
 
         while seconds_done < seconds_needed and not self._should_stop:
             max_allowed = (time.time() - enrolled_ts) + max_future
@@ -451,40 +457,49 @@ class QuestCompleter:
                         "timestamp": min(seconds_needed, timestamp + random.random())
                     })
                     if r.status_code == 200:
+                        failures = 0
                         body = r.json()
-                        if body.get("completed_at"):
-                            self.stats["quests_completed"] += 1
-                            self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
-                            return
+                        if response_completed(body, task_type, seconds_needed):
+                            return True
                         seconds_done = min(seconds_needed, timestamp)
                         pct = (seconds_done / seconds_needed * 100) if seconds_needed else 100
-                        bar = _progress_bar(pct)
-                        self._log(f"  {bar} {seconds_done:.0f}/{seconds_needed}s", "progress")
+                        self._log(f"  {_progress_bar(pct)} {seconds_done:.0f}/{seconds_needed}s", "progress")
                     elif r.status_code == 429:
+                        failures += 1
                         retry_after = r.json().get("retry_after", 5)
                         self._log(f"Rate limited — waiting {retry_after + 1}s", "warn")
                         time.sleep(retry_after + 1)
-                        continue
                     else:
+                        failures += 1
                         self._log(f"Video progress error ({r.status_code}): {r.text[:200]}", "warn")
                 except Exception as e:
+                    failures += 1
                     self._log(f"Video progress error: {e}", "error")
+
+                if failures >= MAX_FAILURES:
+                    self._log(f"  Giving up on \"{name}\" after {failures} failed requests, will retry next scan", "warn")
+                    return False
 
             if timestamp >= seconds_needed:
                 break
             time.sleep(interval)
 
-        # Final request
+        if self._should_stop:
+            return False
+
+        # Final request at the target timestamp; only trust a confirmed response.
         try:
-            self._api.post(f"/quests/{qid}/video-progress", {"timestamp": seconds_needed})
-        except Exception:
-            pass
-        self.stats["quests_completed"] += 1
-        self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
+            r = self._api.post(f"/quests/{qid}/video-progress", {"timestamp": seconds_needed})
+            if r.status_code == 200 and response_completed(r.json(), task_type, seconds_needed):
+                return True
+            self._log(f"Final video request not confirmed ({r.status_code})", "warn")
+        except Exception as e:
+            self._log(f"Final video request failed: {e}", "error")
+        return False
 
-    # ── Complete: Heartbeat (Play/Stream) ─────────────────────────────────
+    # ── Complete: Heartbeat (Play/Stream/Activity) ────────────────────────
 
-    def _complete_heartbeat(self, quest: dict):
+    def _complete_heartbeat(self, quest: dict, stream_key: str, label: str) -> bool:
         name = get_quest_name(quest)
         qid = quest["id"]
         task_type = get_task_type(quest)
@@ -492,69 +507,10 @@ class QuestCompleter:
         seconds_done = get_seconds_done(quest)
 
         remaining = max(0, seconds_needed - seconds_done)
-        emoji = "󰊴" if task_type == "PLAY_ON_DESKTOP" else "󰓦"
-        self._log(f"{emoji} {task_type}: {C.BOLD}{name}{C.RESET} (~{remaining // 60}m remaining)", "quest")
+        self._log(f"{label}: {C.BOLD}{name}{C.RESET} (~{remaining // 60}m remaining)", "quest")
 
-        pid = random.randint(1000, 30000)
-
-        while seconds_done < seconds_needed and not self._should_stop:
-            try:
-                r = self._api.post(f"/quests/{qid}/heartbeat", {
-                    "stream_key": f"call:0:{pid}",
-                    "terminal": False,
-                })
-
-                if r.status_code == 200:
-                    body = r.json()
-                    progress_data = body.get("progress", {})
-                    if progress_data and task_type in progress_data:
-                        seconds_done = progress_data[task_type].get("value", seconds_done)
-
-                    pct = (seconds_done / seconds_needed * 100) if seconds_needed else 100
-                    bar = _progress_bar(pct)
-                    self._log(f"  {bar} {seconds_done:.0f}/{seconds_needed}s", "progress")
-
-                    if body.get("completed_at") or seconds_done >= seconds_needed:
-                        self.stats["quests_completed"] += 1
-                        self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
-                        return
-
-                elif r.status_code == 429:
-                    retry_after = r.json().get("retry_after", 10)
-                    self._log(f"Rate limited — waiting {retry_after + 1}s", "warn")
-                    time.sleep(retry_after + 1)
-                    continue
-                else:
-                    self._log(f"Heartbeat error ({r.status_code}): {r.text[:200]}", "warn")
-
-            except Exception as e:
-                self._log(f"Heartbeat error: {e}", "error")
-
-            time.sleep(HEARTBEAT_INTERVAL)
-
-        # Terminal heartbeat
-        try:
-            self._api.post(f"/quests/{qid}/heartbeat", {
-                "stream_key": f"call:0:{pid}",
-                "terminal": True,
-            })
-        except Exception:
-            pass
-        self.stats["quests_completed"] += 1
-        self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
-
-    # ── Complete: Activity ────────────────────────────────────────────────
-
-    def _complete_activity(self, quest: dict):
-        name = get_quest_name(quest)
-        qid = quest["id"]
-        seconds_needed = get_seconds_needed(quest)
-        seconds_done = get_seconds_done(quest)
-
-        remaining = max(0, seconds_needed - seconds_done)
-        self._log(f"󰊵  Activity: {C.BOLD}{name}{C.RESET} (~{remaining // 60}m remaining)", "quest")
-
-        stream_key = "call:0:1"
+        stalls = 0
+        last_done = seconds_done
 
         while seconds_done < seconds_needed and not self._should_stop:
             try:
@@ -565,42 +521,57 @@ class QuestCompleter:
 
                 if r.status_code == 200:
                     body = r.json()
-                    progress_data = body.get("progress", {})
-                    if progress_data and "PLAY_ACTIVITY" in progress_data:
-                        seconds_done = progress_data["PLAY_ACTIVITY"].get("value", seconds_done)
+                    progress_data = body.get("progress") or {}
+                    if task_type in progress_data:
+                        seconds_done = (progress_data[task_type] or {}).get("value", seconds_done)
 
                     pct = (seconds_done / seconds_needed * 100) if seconds_needed else 100
-                    bar = _progress_bar(pct)
-                    self._log(f"  {bar} {seconds_done:.0f}/{seconds_needed}s", "progress")
+                    self._log(f"  {_progress_bar(pct)} {seconds_done:.0f}/{seconds_needed}s", "progress")
 
                     if body.get("completed_at") or seconds_done >= seconds_needed:
-                        self.stats["quests_completed"] += 1
-                        self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
-                        return
+                        return True
+
+                    if seconds_done > last_done:
+                        last_done = seconds_done
+                        stalls = 0
+                    else:
+                        stalls += 1
 
                 elif r.status_code == 429:
+                    stalls += 1
                     retry_after = r.json().get("retry_after", 10)
                     self._log(f"Rate limited — waiting {retry_after + 1}s", "warn")
                     time.sleep(retry_after + 1)
-                    continue
                 else:
-                    self._log(f"Activity error ({r.status_code}): {r.text[:200]}", "warn")
+                    stalls += 1
+                    self._log(f"Heartbeat error ({r.status_code}): {r.text[:200]}", "warn")
 
             except Exception as e:
-                self._log(f"Activity error: {e}", "error")
+                stalls += 1
+                self._log(f"Heartbeat error: {e}", "error")
+
+            if stalls >= MAX_STALLS:
+                self._log(f"  No progress after {stalls} heartbeats, will retry \"{name}\" next scan", "warn")
+                return False
 
             time.sleep(HEARTBEAT_INTERVAL)
 
-        # Terminal heartbeat
+        if self._should_stop:
+            return False
+
+        # Terminal heartbeat; confirm from its response when possible.
         try:
-            self._api.post(f"/quests/{qid}/heartbeat", {
+            r = self._api.post(f"/quests/{qid}/heartbeat", {
                 "stream_key": stream_key,
                 "terminal": True,
             })
-        except Exception:
-            pass
-        self.stats["quests_completed"] += 1
-        self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
+            if r.status_code == 200 and response_completed(r.json(), task_type, seconds_needed):
+                return True
+        except Exception as e:
+            self._log(f"Final heartbeat failed: {e}", "error")
+
+        # Server already reported the target reached.
+        return seconds_done >= seconds_needed
 
     # ── Process ───────────────────────────────────────────────────────────
 
@@ -621,13 +592,20 @@ class QuestCompleter:
         self._log(f"󰐊 Starting: {C.BOLD}{name}{C.RESET} (task: {C.CYAN}{task_type}{C.RESET})", "quest")
 
         if task_type in ("WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE"):
-            self._complete_video(quest)
+            ok = self._complete_video(quest)
         elif task_type in ("PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP"):
-            self._complete_heartbeat(quest)
-        elif task_type == "PLAY_ACTIVITY":
-            self._complete_activity(quest)
+            pid = random.randint(1000, 30000)
+            emoji = "󰊴" if task_type == "PLAY_ON_DESKTOP" else "󰓦"
+            ok = self._complete_heartbeat(quest, f"call:0:{pid}", f"{emoji} {task_type}")
+        else:
+            ok = self._complete_heartbeat(quest, "call:0:1", "󰊵  Activity")
 
-        self._completed_ids.add(qid)
+        if ok:
+            self.stats["quests_completed"] += 1
+            self._completed_ids.add(qid)
+            self._log(f"  {C.GREEN}󰄲 Completed: {name}{C.RESET}", "ok")
+        elif not self._should_stop:
+            self._log(f"  {C.YELLOW}Not completed: {name} — will retry next scan{C.RESET}", "warn")
 
     # ── Main Run ──────────────────────────────────────────────────────────
 
@@ -692,7 +670,10 @@ class QuestCompleter:
                     for q in actionable:
                         if self._should_stop:
                             break
-                        self._process_quest(q)
+                        try:
+                            self._process_quest(q)
+                        except Exception as e:
+                            self._log(f"Error processing quest {q.get('id', '?')}: {e}", "error")
                 else:
                     self._log("  󰒲 No quests to complete", "info")
             else:
@@ -859,13 +840,11 @@ def main():
         epilog=f"""
 Examples:
   python direct_run.py                       # Interactive mode
-  python direct_run.py --token <TOKEN>       # Single token
   python direct_run.py --file tokens.txt     # Multi-token file
   python direct_run.py --once                # Run once and exit
   python direct_run.py --poll 120            # Poll every 120 seconds
 """,
     )
-    parser.add_argument("--token", "-t", type=str, help="Discord user token")
     parser.add_argument("--file", "-f", type=str, help="File containing token(s), one per line")
     parser.add_argument("--poll", "-p", type=int, default=60, help="Polling interval between scans (seconds, default: 60)")
     parser.add_argument("--once", action="store_true", help="Run once and exit")
@@ -874,10 +853,7 @@ Examples:
 
     tokens = []
 
-    # Priority: --token > --file > interactive prompt
-    if args.token:
-        tokens = [args.token]
-    elif args.file:
+    if args.file:
         if not os.path.isfile(args.file):
             print(f"  {C.RED}󰅖 File does not exist: {args.file}{C.RESET}")
             sys.exit(1)

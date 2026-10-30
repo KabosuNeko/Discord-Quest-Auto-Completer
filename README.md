@@ -26,9 +26,6 @@ token=webpackChunkdiscord_app.push([[Symbol()],0,e=>{for(i in e.c)if(i=e.c[i].ex
 # Interactive mode — paste tokens directly in terminal
 python direct_run.py
 
-# Pass a token directly via argument
-python direct_run.py --token "YOUR_TOKEN_HERE"
-
 # Multiple accounts from a file (one token per line, lines starting with # are ignored)
 python direct_run.py --file tokens.txt
 
@@ -39,6 +36,8 @@ python direct_run.py --once
 python direct_run.py --poll 120
 ```
 
+Treat a token like a password: it grants full access to the account. Keep `tokens.txt` private and never commit it (it is already in `.gitignore`).
+
 ## Supported Quest Task Types
 
 | Task Type | Description |
@@ -48,6 +47,12 @@ python direct_run.py --poll 120
 | `PLAY_ON_DESKTOP` | Emulates playing a desktop game |
 | `STREAM_ON_DESKTOP` | Emulates streaming a game to friends |
 | `PLAY_ACTIVITY` | Emulates playing a Discord Activity |
+
+## Testing
+
+```bash
+python test_direct_run.py
+```
 
 ## Exit
 
